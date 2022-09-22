@@ -1,0 +1,204 @@
+---
+title: "Topic Modeling with Quanteda"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+# Packages
+```{r}
+# # You may need to install some of these packages - uncomment and run if so
+# install.packages("quanteda")
+# install.packages("quanteda.textmodels")
+# install.packages("devtools") # - for installing packages fromn Github that don't exist on CRAN
+
+# # Topic Modeling
+# install.packages("stm") #Structured Topic Models
+# #install.packages("seededlda") # Alternative Topic Model implementation: LDA with topic seeding
+# #install.packages("topicmodels") # Alternative Topic Model implementation - LDA
+
+# # Visualization and plotting
+# install.packages("ggplot2")
+# install.packages("wordcloud")
+# install.packages("igraph")
+
+#Imports
+library("quanteda")
+library("quanteda.textmodels")
+library("devtools")
+#devtools::install_github("quanteda/quanteda.corpora") # Bigger text corpora
+library("quanteda.corpora")
+library("ggplot2")
+library("wordcloud")
+library("igraph")
+```
+
+# Corpus: Guardian news articles
+```{r}
+guardian_corpus <- download("data_corpus_guardian") # This needs quanteda.corpora installed
+```
+
+# Preprocessing and Reformatting
+- Preprocess the corpus and reformat it as a Document Feature Matrix
+- Trim the corpus to weed out less relevant data and make analysis faster
+```{r}
+enhanced_stopwords <- c(stopwords("en"), "said", "says", "|") # The pipe and 'says' are very prevalent otherwise
+guardian_dfm <- tokens(guardian_corpus, remove_punct = TRUE, remove_numbers = TRUE) %>%
+    tokens_remove(enhanced_stopwords) %>%
+    # you can stem / lemmatize here if desired
+    dfm()
+
+# Trim the corpus: goes from 95k features (99.7% sparse) to 10k features (97.7% sparse)
+guardian_dfm <- dfm_trim(guardian_dfm, min_termfreq = 20, min_docfreq = 20)
+# Print a summary
+guardian_dfm
+```
+
+# Try to choose the optimal K (number of topics)
+- Uses the STM package; you can choose a different value (below, I use 20), but this tries to optimize for topic coherency
+- Warning this has a lot of output and takes a long time! Forgot to time but probably 20+ minutes
+```{r}
+# https://www.rdocumentation.org/packages/stm/versions/1.3.6/topics/searchK
+out <- convert(guardian_dfm, to='stm')
+documents <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+K = c(5,10,15,20,25,30,35,40)
+set.seed(42)
+kresult <- searchK(documents, vocab, K, data=meta, verbose=FALSE) # meta is only used by STM not LDA. verbose=FALSE?
+kresult
+```
+
+# Plot the K estimations
+```{r}
+# In depth discussion of model fitting: https://francescocaberlin.blog/2019/06/26/messing-around-with-stm-part-iiia-model-selection/
+plot(kresult)
+```
+# See if we can get a better intersection for various factors
+- Warning, runs for a very long time!! About 98 minutes for me
+- Semantic coherence bottomed out at 70 topics for me. Running this didn't make much of a difference
+- 40 topics seemed to be ok in terms of "eyeball" coherence, but not much better / more specific than 20
+```{r}
+ptm <- proc.time()
+k_spread <- c(10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
+kresult_big <- searchK(documents, vocab, k_spread, data=meta, verbose=FALSE) # meta is only used by STM not LDA. verbose=FALSE?
+print(proc.time() - ptm)
+plot(kresult_big)
+```
+
+# More plotting
+- If you are looking for more options on evaluating models, go check out https://juliasilge.com/blog/evaluating-stm/
+
+# Train our Topic Model!
+- We will use the STM (Structured Topic Model) package because it has some nice plotting and summary statistics methods. We already used it above for tuning the K (number of topics) hyperparameter
+- See: RDocumentation for STM: https://www.rdocumentation.org/packages/stm/versions/1.3.6
+- See: STM vignette: https://cran.r-project.org/web/packages/stm/stm.pdf
+- The other implementations above are also good options. STM and `seededlda` have some interesting capabilities that we won't get into; STM you can provide additional docvar metadata to supposedly improve the modeling. `seededlda` can take "seeded" topics that you as the researcher provide as a starting point for training, almost like creating categories/labels to "center" the topics.
+```{r}
+# For k=20, this takes about 2.5 minutes on an M1 Pro with 32GB RAM, 8 minutes on an older Macbook with 16GB RAM
+ptm <- proc.time()
+guardian_topics_stm <- stm(guardian_dfm, K=20, verbose=FALSE) # verbose=TRUE for feedback while training; K changes the number of topics
+proc.time() - ptm
+```
+
+# Print the "Top Words" for each topic with different methods for determining relevance
+```{r}
+labelTopics(guardian_topics_stm)
+```
+
+# Create a word cloud of a topic's tokens
+```{r}
+cloud(guardian_topics_stm, topic = 13, scale = c(3, 0.25))
+```
+
+# Plot the topics and most strongly associated tokens
+```{r}
+# this is STM's default 'plot' rendering, called "summary": # https://www.rdocumentation.org/packages/stm/versions/1.3.6/topics/plot.STM
+plot(guardian_topics_stm, n=5) # 5 tokens per topic; 
+```
+
+# Yet another way to plot topics, this time with labels which you can generate
+```{r}
+## Put labels in a vector; make sure these match up with your topics as they may be different!
+labels <- c("Courts / Legal", "Tech", "British Shopping", "Family", "Economy / Markets",
+            "British Elections", "Metadata", "Religion / Sexuality", "Climate", "???",
+            "Middle East Conflicts", "Healthcare", "US Elections", "NSA / Snowdown", "Local Crime",
+            "Banking / Bailout", "Housing", "Air Travel", "Food and Sustainability", "Places and Spaces"
+            )
+## Extract theta from the stm-model. Theta captures the modal estimate of the proportion of word tokens assigned to the topic under the model (e.g., higher theta = more associated)
+df <- data.frame(labels)
+proportion <- as.data.frame(colSums(guardian_topics_stm$theta/nrow(guardian_topics_stm$theta)))
+df <- cbind(df, proportion)
+colnames(df) <- c("Labels", "Probability")
+
+## Sort the dataframe
+df <- df[order(-proportion), ] 
+df$Labels <- factor(df$Labels, levels = rev(df$Labels))
+df$Probability <- as.numeric(df$Probability)
+df$Probability <- round(df$Probability, 4)
+
+## Plot graph
+ggplot(df, aes(x = Labels, y = Probability)) + 
+  geom_bar(stat = "identity") + 
+  scale_y_continuous(breaks = c(0, 0.15), limits = c(0, 0.15), expand = c(0, 0)) + #change breaks and limits as you need
+  coord_flip() + 
+  geom_text(aes(label = scales::percent(Probability)), #Scale in percent
+            hjust = -0.25, size = 4,
+            position = position_dodge(width = 1),
+            inherit.aes = TRUE) + 
+  theme(panel.border = element_blank())
+```
+
+
+# compare "US politics" and "British politics" topics wtih "perspective" plot type
+```{r}
+plot(guardian_topics_stm, type = "perspectives", topics = c(13, 6))
+```
+
+# Plot topic correlation using igraph
+```{r}
+library("igraph")
+guardian_topic_correlations <- topicCorr(guardian_topics_stm)
+plot(guardian_topic_correlations)
+```
+# Make a table of topic proportions
+```{r}
+guardian_topics_proportions_table <- make.dt(guardian_topics_stm)
+summarize_all(guardian_topics_proportions_table, mean)
+guardian_topics_proportions_table
+```
+
+What can we do with this table? Find the most associated documents with a topic ...
+```{r}
+guardian_topics_proportions_table[docnum[order(Topic13, decreasing=TRUE)][1:5]]
+```
+```{r}
+docvars(guardian_corpus[3147], field="head") # `head` is a docvar
+```
+
+```{r}
+print(guardian_corpus[3147], max_nchar=2000)
+```
+
+# Here's a different way to find the documents most closely associated with a topic
+```{r}
+out <- convert(guardian_dfm, to='stm')
+# str(out)
+findThoughts(guardian_topics_stm, texts=out$meta$head, n=10, topics=13)$docs[[1]]
+```
+
+# How about finding the topics most associated with an individual document?
+```{r}
+# We use the guardian_topics_proportions_table we created above
+```
+
+# Fit a new document with an existing model
+- See: https://rdrr.io/cran/stm/man/fitNewDocuments.html
+
+```{r}
+
+```
+
